@@ -1,0 +1,105 @@
+final AWS_CREDS_ID_NPROD = 'svc_velocify_jenkins_dev_04212022'
+final AWS_CREDS_ID_PROD = 'svc_velocify_jenkins_prod_05092022'
+final S3_BUCKET = "em-vlfy-build-deploy-pkgs"
+final MAPREGION = ['us-east-1':'e1','us-west-2':'w2']
+final MAPENV = ['dev1':'d1','dev2':'d2','qa':'q','peg':'pg','stg':'s','stg2':'s','prod':'p','prod2':'p'] 
+def AWS_CREDS_ID = null
+
+pipeline {
+  agent { node { label 'Linux' } }
+
+  environment {
+    SLACKCHANNEL = "csre_automation_alerts"
+    MSG_TOPIC = "Automated Tasks - Velocify - ${ENVIRONMENT} - ${JOB_BASE_NAME} - ${VERSION} ${REGION}"
+  }
+
+  parameters {
+    booleanParam(name: 'Refresh', defaultValue: false, description: 'Read Latest Jenkinsfile Without Starting Pipeline.')
+    choice(name: 'REGION', choices: ['us-east-1','us-west-2'], description: 'Select the Region.')
+    choice(name: 'ENVIRONMENT', choices: ['dev1','dev2','qa','peg','stg','stg2','prod','prod2'], description: 'Select the Environment.')
+    string(name: 'FILE', defaultValue: 'C:\\Windows\\System32\\config\\SYSTEM', description: 'File to get size.')
+    choice(name: 'HOST_TYPE', choices: ['rdp','ap','ain','win','wb'], description: 'Select the Target Host.')
+  }
+
+  stages {
+    stage ('Setup') {
+      when { expression { params.Refresh == false } }
+      steps {
+        script {
+          if (params.ENVIRONMENT == 'stg2' || params.ENVIRONMENT == 'stg' || params.ENVIRONMENT == 'prod2' || params.ENVIRONMENT == 'prod') {
+             AWS_CREDS_ID = "${AWS_CREDS_ID_PROD}"
+          } else {
+             AWS_CREDS_ID = "${AWS_CREDS_ID_NPROD}"
+          }
+
+          withAwsCli(credentialsId: "${AWS_CREDS_ID}", defaultRegion: "${params.REGION}") {
+            dir("${WORKSPACE}") {
+              sh """
+              #!/bin/bash
+              if [ '${AWS_CREDS_ID}' = '${AWS_CREDS_ID_NPROD}' ]; then
+                aws s3 sync ./sysops/ec2/ec2_scan_filesize/scripts "s3://${S3_BUCKET}/automation/ec2_scan_filesize/scripts/" --exact-timestamps --delete  
+              fi
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage ("Scan") {
+      when { expression { params.Refresh == false } }
+      steps {
+        script {
+          withAwsCli(credentialsId: "${AWS_CREDS_ID}", defaultRegion: "${params.REGION}") {
+            sh """
+            #!/bin/bash
+            bucket="${S3_BUCKET}"
+            timestamp="\$(date +'%Y%m%d')"
+            hostsuffix="${MAPENV["$ENVIRONMENT"]}${MAPREGION["$REGION"]}-${HOST_TYPE}*"
+            instanceIds=\$(aws ec2 describe-instances --filters "Name=instance-state-name,Values=running Name=tag:Name,Values=\$hostsuffix" --query "Reservations[].Instances[].InstanceId" --output text | sed -E 's/\t/,/g')
+            commandid=\$(aws ssm send-command \
+            --document-name AWS-RunPowerShellScript \
+            --output-s3-bucket-name "\${bucket}" \
+            --output-s3-key-prefix "./automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}" \
+            --targets Key=InstanceIds,Values="\${instanceIds}" \
+            --parameters workingDirectory="",executionTimeout=3600,commands=["New-Item -Force -Path C:\\Temp\\filescan -ItemType directory","aws s3 sync s3://\$bucket/automation/ec2_scan_filesize/scripts/ C:\\Temp\\filescan\\scripts","C:\\Temp\\filescan\\scripts\\getfilesize.ps1 -filepath ${params.FILE}"] \
+            --query 'Command.CommandId' --output text)
+
+            undoneStatuses=('Pending' 'InProgress' 'Delayed')
+            while : ; do
+              allcomplete=true
+              statuses=\$(aws ssm list-command-invocations --command-id \$commandid --query 'CommandInvocations[].Status' --output text)
+              echo \$statuses
+              for status in \${statuses[@]}
+              do
+                if [[ \${undoneStatuses[*]} =~ \$status ]]; then
+                   allcomplete=false
+                   break
+                fi
+              done
+        
+              if [ "\${allcomplete}" = "true" ]; then
+                break
+              fi
+              sleep 10s
+            done
+
+            keys=\$(aws s3 ls --recursive "s3://\${bucket}/automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}/\${commandid}" | egrep -o '\\S+\\/stdout\$')
+            for key in \${keys[@]}
+            do
+              aws s3 cp "s3://\${bucket}/\${key}" /tmp/stdout
+              grep '>>>>' /tmp/stdout
+            done
+            """
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      cleanWs()
+    }
+  }
+}
