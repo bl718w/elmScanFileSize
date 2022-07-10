@@ -3,8 +3,10 @@ final AWS_CREDS_ID_PROD = 'svc_velocify_jenkins_prod_05092022'
 final S3_BUCKET = "em-vlfy-build-deploy-pkgs"
 final MAPREGION = ['us-east-1':'e1','us-west-2':'w2']
 final MAPENV = ['dev1':'d1','dev2':'d2','qa':'q','peg':'pg','stg':'s','stg2':'s','prod':'p','prod2':'p'] 
+final PAGESIZE = 10
 def AWS_CREDS_ID = null
 def S3LOGS = null
+
 
 pipeline {
   agent { node { label 'Linux' } }
@@ -20,7 +22,7 @@ pipeline {
     choice(name: 'ENVIRONMENT', choices: ['dev1','dev2','qa','peg','stg','prod'], description: 'Select the Environment.')
     string(name: 'FILE', defaultValue: 'C:\\Windows\\System32\\config\\SYSTEM', description: 'File to get size.')
     choice(name: 'SIZEMB', choices: [50,100,500,1000], description: 'Select the file size in MB.')
-    choice(name: 'HOST_TYPE', choices: ['ap0','ap1','ain','win','wb01','wb02','wb03','wb05','wb07','wb12','wb13','wb16'], description: 'Select the Target Host.')
+    choice(name: 'HOST_TYPE', choices: ['rdp','ap','ap0','ap1','ain','win','wb','wb01','wb02','wb03','wb05','wb07','wb12','wb13','wb16'], description: 'Select the Target Host.')
   }
 
   stages {
@@ -61,42 +63,50 @@ pipeline {
             logbucket="${S3LOGS}"
             timestamp="\$(date +'%Y%m%d')"
             hostsuffix="${MAPENV["$ENVIRONMENT"]}${MAPREGION["$REGION"]}-${HOST_TYPE}*"
-            instanceIds=\$(aws ec2 describe-instances --filters Name=instance-state-name,Values=running Name=tag:Name,Values="\$hostsuffix" --query "Reservations[].Instances[].InstanceId" --output text | sed -E 's/\t/,/g')
-            commandid=\$(aws ssm send-command \
-            --document-name AWS-RunPowerShellScript \
-            --output-s3-bucket-name "\$logbucket" \
-            --output-s3-key-prefix "./automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}" \
-            --targets Key=InstanceIds,Values="\${instanceIds}" \
-            --parameters workingDirectory="",executionTimeout=3600,commands=["New-Item -Force -Path C:\\Temp\\filescan -ItemType directory","aws s3 sync s3://\$bucket/automation/ec2_scan_filesize/scripts/ C:\\Temp\\filescan\\scripts --exact-timestamps","C:\\Temp\\filescan\\scripts\\getfilesize.ps1 -FilePath ${params.FILE} -SizeInMB ${params.SIZEMB}","Remove-Item -Path C:\\Temp\\filescan -Force -Recurse"] \
-            --query 'Command.CommandId' --output text)
+            instanceEc2Ids=\$(aws ec2 describe-instances --filters Name=instance-state-name,Values=running Name=tag:Name,Values="\$hostsuffix" --query "Reservations[].Instances[].InstanceId" --output text | sed -E 's/\t/,/g')
+            instanceAryIds=( \$(aws ssm describe-instance-information --filters Key=InstanceIds,Values="\$instanceEc2Ids" --query 'InstanceInformationList[?PingStatus == `Online`].InstanceId' --output text) )
 
-            undoneStatuses=('Pending' 'InProgress' 'Delayed')
-            while : ; do
-              allcomplete=true
-              statuses=\$(aws ssm list-command-invocations --command-id \$commandid --query 'CommandInvocations[].Status' --output text)
-              echo \$statuses
-              for status in \${statuses[@]}
-              do
-                if [[ \${undoneStatuses[*]} =~ \$status ]]; then
-                   allcomplete=false
-                   break
+            pagesize=${PAGESIZE}
+            instanceIdsSize=\${#instanceAryIds[@]}
+            count=\$(( instanceIdsSize/pagesize + instanceIdsSize%pagesize - 1))
+            for (( i=0; i<\$count; i++ )); do
+              instanceIds=\$( echo \${instanceAryIds[@]:\$((i*pagesize)):pagesize} | sed -E 's/ /,/g' )
+              commandid=\$(aws ssm send-command \
+              --document-name AWS-RunPowerShellScript \
+              --output-s3-bucket-name "\$logbucket" \
+              --output-s3-key-prefix "./automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}" \
+              --targets Key=InstanceIds,Values="\${instanceIds}" \
+              --parameters workingDirectory="",executionTimeout=3600,commands=["New-Item -Force -Path C:\\Temp\\filescan -ItemType directory","aws s3 sync s3://\$bucket/automation/ec2_scan_filesize/scripts/ C:\\Temp\\filescan\\scripts --exact-timestamps","C:\\Temp\\filescan\\scripts\\getfilesize.ps1 -FilePath ${params.FILE} -SizeInMB ${params.SIZEMB}","Remove-Item -Path C:\\Temp\\filescan -Force -Recurse"] \
+              --query 'Command.CommandId' --output text)
+  
+              undoneStatuses=('Pending' 'InProgress' 'Delayed')
+              while : ; do
+                allcomplete=true
+                statuses=\$(aws ssm list-command-invocations --command-id \$commandid --query 'CommandInvocations[].Status' --output text)
+                echo \$statuses
+                for status in \${statuses[@]}
+                do
+                  if [[ \${undoneStatuses[*]} =~ \$status ]]; then
+                     allcomplete=false
+                     break
+                  fi
+                done
+          
+                if [ "\${allcomplete}" = "true" ]; then
+                  break
                 fi
+                sleep 10s
               done
-        
-              if [ "\${allcomplete}" = "true" ]; then
-                break
-              fi
-              sleep 10s
+              
+              set +x
+              keys=\$(aws s3 ls --recursive "s3://\$logbucket/automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}/\${commandid}" | egrep -o '\\S+\\/stdout\$')
+              for key in \${keys[@]}
+              do
+                aws s3 cp "s3://\$logbucket/\${key}" /tmp/stdout > /dev/null
+                grep '>>>>' /tmp/stdout || true
+              done
+              set -x
             done
-            
-            set +x
-            keys=\$(aws s3 ls --recursive "s3://\$logbucket/automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}/\${commandid}" | egrep -o '\\S+\\/stdout\$')
-            for key in \${keys[@]}
-            do
-              aws s3 cp "s3://\$logbucket/\${key}" /tmp/stdout > /dev/null
-              grep '>>>>' /tmp/stdout || true
-            done
-            set -x
             """
           }
         }
