@@ -67,10 +67,9 @@ pipeline {
             instanceAryIds=( \$(aws ssm describe-instance-information --filters Key=InstanceIds,Values="\$instanceEc2Ids" --query 'InstanceInformationList[?PingStatus == `Online`].InstanceId' --output text) )
 
             pagesize=${PAGESIZE}
-            instanceIdSize=\${#instanceAryIds[@]}
-            instanceIdSizeMod=$(( instanceIdSize % pagesize > 1 ? 1 : 0 ))
-            count=\$(( (instanceIdSize / pagesize) + instanceIdSizeMod - 1 ))
-            for (( i=0; i<\$count; i++ )); do
+            instanceIdsSize=\${#instanceAryIds[@]}
+            count=\$(( instanceIdsSize/pagesize + (instanceIdsSize%pagesize>0?1:0) - 1))
+            for (( i=0; i<=\$count; i++ )); do
               instanceIds=\$( echo \${instanceAryIds[@]:\$((i*pagesize)):pagesize} | sed -E 's/ /,/g' )
               commandid=\$(aws ssm send-command \
               --document-name AWS-RunPowerShellScript \
