@@ -22,7 +22,7 @@ pipeline {
     choice(name: 'ENVIRONMENT', choices: ['dev1','dev2','qa','peg','stg','prod'], description: 'Select the Environment.')
     string(name: 'FILEFOLDER', defaultValue: 'C:\\Windows\\System32\\config\\SYSTEM', description: 'Enter the file or folder to get size.')
     choice(name: 'SIZEMB', choices: [50,100,500,1000], description: 'Select the file size in MB.')
-    choice(name: 'HOST_TYPE', choices: ['rdp','ap','ap0','ap1','ain','win','wb','wb01','wb02','wb03','wb05','wb07','wb12','wb13','wb16'], description: 'Select the Target Host.')
+    choice(name: 'HOST_TYPE', choices: ['all','rdp','ap','ap0','ap1','ain','win','wb','wb01','wb02','wb03','wb05','wb07','wb12','wb13','wb16'], description: 'Select the Target Host.')
   }
 
   stages {
@@ -62,15 +62,20 @@ pipeline {
             bucket="${S3_BUCKET}"
             logbucket="${S3LOGS}"
             timestamp="\$(date +'%Y%m%d')"
-            hostsuffix="${MAPENV["$ENVIRONMENT"]}${MAPREGION["$REGION"]}-${HOST_TYPE}*"
-            instanceEc2Ids=\$(aws ec2 describe-instances --filters Name=instance-state-name,Values=running Name=tag:Name,Values="\$hostsuffix" --query "Reservations[].Instances[].InstanceId" --output text | sed -E 's/\t/,/g')
-            instanceAryIds=( \$(aws ssm describe-instance-information --filters Key=InstanceIds,Values="\$instanceEc2Ids" --query 'InstanceInformationList[?PingStatus == `Online`].InstanceId' --output text) )
+
+            if [ '${params.HOST_TYPE}' = 'all' ]; then
+              hostsuffix="${MAPENV["$ENVIRONMENT"]}${MAPREGION["$REGION"]}*"
+            else
+              hostsuffix="${MAPENV["$ENVIRONMENT"]}${MAPREGION["$REGION"]}-${HOST_TYPE}*"
+            fi
+            instanceEc2Ids=( \$(aws ec2 describe-instances --filters Name=instance-state-name,Values=running Name=tag:Name,Values="\$hostsuffix" --query "Reservations[].Instances[].InstanceId" --output text) )
 
             pagesize=${PAGESIZE}
-            instanceIdsSize=\${#instanceAryIds[@]}
-            count=\$(( instanceIdsSize/pagesize + (instanceIdsSize%pagesize>0?1:0) - 1))
+            instanceEc2Size=\${#instanceEc2Ids[@]}
+            count=\$(( instanceEc2Size/pagesize + (instanceEc2Size%pagesize>0?1:0) - 1))
             for (( i=0; i<=\$count; i++ )); do
-              instanceIds=\$( echo \${instanceAryIds[@]:\$((i*pagesize)):pagesize} | sed -E 's/ /,/g' )
+              instanceEc2Csv=\$( echo \${instanceEc2Ids[@]:\$((i*pagesize)):pagesize} | sed -E 's/ /,/g' )  
+              instanceIds=\$(aws ssm describe-instance-information --filters Key=InstanceIds,Values="\$instanceEc2Csv" --query 'InstanceInformationList[?PingStatus == `Online`].InstanceId' --output text | sed -E 's/\t/,/g' )
               commandid=\$(aws ssm send-command \
               --document-name AWS-RunPowerShellScript \
               --output-s3-bucket-name "\$logbucket" \
@@ -115,6 +120,12 @@ pipeline {
   }
 
   post {
+    success {
+      slackSend(channel: "${SLACKCHANNEL}", message: "*${MSG_TOPIC} SUCCESS* - (BRANCH ${GIT_BRANCH}, COMMIT ${GIT_COMMIT})  - ${JOB_NAME} => ${BUILD_URL} ", color: "#00FF00")    
+    }
+    failure {
+      slackSend(channel: "${SLACKCHANNEL}",, message: "*${MSG_TOPIC} FAILURE* - (BRANCH ${GIT_BRANCH}, COMMIT ${GIT_COMMIT}) - ${JOB_NAME} => ${BUILD_URL}  ", color: "#FF0000")
+    }
     always {
       cleanWs()
     }
