@@ -68,7 +68,7 @@ pipeline {
 
             pagesize=${PAGESIZE}
             instanceIdsSize=\${#instanceAryIds[@]}
-            count=\$(( instanceIdsSize/pagesize + instanceIdsSize%pagesize - 1))
+            count=\$(( (instanceIdsSize/pagesize + instanceIdsSize%pagesize) - 1))
             for (( i=0; i<\$count; i++ )); do
               instanceIds=\$( echo \${instanceAryIds[@]:\$((i*pagesize)):pagesize} | sed -E 's/ /,/g' )
               commandid=\$(aws ssm send-command \
