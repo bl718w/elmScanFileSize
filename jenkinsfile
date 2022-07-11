@@ -3,7 +3,7 @@ final AWS_CREDS_ID_PROD = 'svc_velocify_jenkins_prod_05092022'
 final S3_BUCKET = "em-vlfy-build-deploy-pkgs"
 final MAPREGION = ['us-east-1':'e1','us-west-2':'w2']
 final MAPENV = ['dev1':'d1','dev2':'d2','qa':'q','peg':'pg','stg':'s','stg2':'s','prod':'p','prod2':'p'] 
-final PAGESIZE = 10
+final PAGESIZE = 25
 def AWS_CREDS_ID = null
 def S3LOGS = null
 
@@ -20,7 +20,7 @@ pipeline {
     booleanParam(name: 'Refresh', defaultValue: false, description: 'Read Latest Jenkinsfile Without Starting Pipeline.')
     choice(name: 'REGION', choices: ['us-east-1','us-west-2'], description: 'Select the Region.')
     choice(name: 'ENVIRONMENT', choices: ['dev1','dev2','qa','peg','stg','prod'], description: 'Select the Environment.')
-    string(name: 'FILE', defaultValue: 'C:\\Windows\\System32\\config\\SYSTEM', description: 'File to get size.')
+    string(name: 'FILEFOLDER', defaultValue: 'C:\\Windows\\System32\\config\\SYSTEM', description: 'Enter the file or folder to get size.')
     choice(name: 'SIZEMB', choices: [50,100,500,1000], description: 'Select the file size in MB.')
     choice(name: 'HOST_TYPE', choices: ['rdp','ap','ap0','ap1','ain','win','wb','wb01','wb02','wb03','wb05','wb07','wb12','wb13','wb16'], description: 'Select the Target Host.')
   }
@@ -76,7 +76,7 @@ pipeline {
               --output-s3-bucket-name "\$logbucket" \
               --output-s3-key-prefix "./automation/ec2_scan_filesize/logs/${ENVIRONMENT}/\${timestamp}" \
               --targets Key=InstanceIds,Values="\${instanceIds}" \
-              --parameters workingDirectory="",executionTimeout=3600,commands=["New-Item -Force -Path C:\\Temp\\filescan -ItemType directory","aws s3 sync s3://\$bucket/automation/ec2_scan_filesize/scripts/ C:\\Temp\\filescan\\scripts --exact-timestamps","C:\\Temp\\filescan\\scripts\\getfilesize.ps1 -FilePath ${params.FILE} -SizeInMB ${params.SIZEMB}","Remove-Item -Path C:\\Temp\\filescan -Force -Recurse"] \
+              --parameters workingDirectory="",executionTimeout=3600,commands=["New-Item -Force -Path C:\\Temp\\filescan -ItemType directory","aws s3 sync s3://\$bucket/automation/ec2_scan_filesize/scripts/ C:\\Temp\\filescan\\scripts --exact-timestamps","C:\\Temp\\filescan\\scripts\\getfilesize.ps1 -FilePath ${params.FILEFOLDER} -SizeInMB ${params.SIZEMB}","Remove-Item -Path C:\\Temp\\filescan -Force -Recurse"] \
               --query 'Command.CommandId' --output text)
   
               undoneStatuses=('Pending' 'InProgress' 'Delayed')
